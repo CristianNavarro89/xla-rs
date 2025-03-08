@@ -149,3 +149,136 @@ impl Literal {
         };
         Ok(())
     }
+
+    /// Copy the values stored in the literal in a newly created vector. The data is flattened out
+    /// for literals with more than one dimension.
+    pub fn to_vec<T: ArrayElement>(&self) -> Result<Vec<T>> {
+        let element_count = self.element_count();
+        // Maybe we should use an uninitialized vec instead?
+        let mut data = vec![T::ZERO; element_count];
+        self.copy_raw_to(&mut data)?;
+        Ok(data)
+    }
+
+    /// Create a literal from a scalar value, the resulting literal has zero dimensions and stores
+    /// a single element.
+    pub fn scalar<T: NativeType>(t: T) -> Self {
+        let ptr = unsafe { T::create_r0(t) };
+        Literal(ptr)
+    }
+
+    /// Create a literal from a slice of data, the resulting literal has one dimension which size
+    /// is the same as the slice passed as argument.
+    pub fn vec1<T: NativeType>(f: &[T]) -> Self {
+        let ptr = unsafe { T::create_r1(f.as_ptr(), f.len()) };
+        Literal(ptr)
+    }
+
+    /// Create a new literal containing the same data but using a different shape. This returns an
+    /// error if the number of elements in the literal is different from the product of the target
+    /// dimension sizes.
+    pub fn reshape(&self, dims: &[i64]) -> Result<Literal> {
+        let mut result: c_lib::literal = std::ptr::null_mut();
+        let status =
+            unsafe { c_lib::literal_reshape(self.0, dims.as_ptr(), dims.len(), &mut result) };
+        super::handle_status(status)?;
+        Ok(Literal(result))
+    }
+
+    /// Create a new literal containing the data from the original literal casted to a new
+    /// primitive type. The dimensions of the resulting literal are the same as the dimensions of
+    /// the original literal.
+    pub fn convert(&self, ty: PrimitiveType) -> Result<Literal> {
+        let mut result: c_lib::literal = std::ptr::null_mut();
+        let status = unsafe { c_lib::literal_convert(self.0, ty as i32, &mut result) };
+        super::handle_status(status)?;
+        Ok(Literal(result))
+    }
+
+    /// When the input is a tuple, return a vector of its elements. This replaces the original
+    /// value by an empty tuple, no copy is performed.
+    pub fn decompose_tuple(&mut self) -> Result<Vec<Literal>> {
+        match self.shape()? {
+            Shape::Array(_) | Shape::Unsupported(_) => Ok(vec![]),
+            Shape::Tuple(shapes) => {
+                let tuple_len = shapes.len();
+                let mut outputs = vec![std::ptr::null_mut::<c_lib::_literal>(); tuple_len];
+                unsafe { c_lib::literal_decompose_tuple(self.0, outputs.as_mut_ptr(), tuple_len) };
+                Ok(outputs.into_iter().map(Literal).collect())
+            }
+        }
+    }
+
+    pub fn to_tuple(mut self) -> Result<Vec<Literal>> {
+        self.decompose_tuple()
+    }
+
+    pub fn to_tuple1(mut self) -> Result<Self> {
+        let mut tuple = self.decompose_tuple()?;
+        if tuple.len() != 1 {
+            Err(Error::UnexpectedNumberOfElemsInTuple { expected: 1, got: tuple.len() })?
+        }
+        let v1 = tuple.pop().unwrap();
+        Ok(v1)
+    }
+
+    pub fn to_tuple2(mut self) -> Result<(Self, Self)> {
+        let mut tuple = self.decompose_tuple()?;
+        if tuple.len() != 2 {
+            Err(Error::UnexpectedNumberOfElemsInTuple { expected: 2, got: tuple.len() })?
+        }
+        let v2 = tuple.pop().unwrap();
+        let v1 = tuple.pop().unwrap();
+        Ok((v1, v2))
+    }
+
+    pub fn to_tuple3(mut self) -> Result<(Self, Self, Self)> {
+        let mut tuple = self.decompose_tuple()?;
+        if tuple.len() != 3 {
+            Err(Error::UnexpectedNumberOfElemsInTuple { expected: 3, got: tuple.len() })?
+        }
+        let v3 = tuple.pop().unwrap();
+        let v2 = tuple.pop().unwrap();
+        let v1 = tuple.pop().unwrap();
+        Ok((v1, v2, v3))
+    }
+
+    pub fn to_tuple4(mut self) -> Result<(Self, Self, Self, Self)> {
+        let mut tuple = self.decompose_tuple()?;
+        if tuple.len() != 4 {
+            Err(Error::UnexpectedNumberOfElemsInTuple { expected: 4, got: tuple.len() })?
+        }
+        let v4 = tuple.pop().unwrap();
+        let v3 = tuple.pop().unwrap();
+        let v2 = tuple.pop().unwrap();
+        let v1 = tuple.pop().unwrap();
+        Ok((v1, v2, v3, v4))
+    }
+
+    pub fn tuple(elems: Vec<Self>) -> Self {
+        let elem_ptrs: Vec<_> = elems.iter().map(|e| e.0).collect();
+        let literal =
+            unsafe { c_lib::literal_make_tuple_owned(elem_ptrs.as_ptr(), elem_ptrs.len()) };
+        // Ensure that elems are only dropped after the pointers have been used.
+        drop(elems);
+        Self(literal)
+    }
+}
+
+impl<T: NativeType> From<T> for Literal {
+    fn from(f: T) -> Self {
+        Literal::scalar(f)
+    }
+}
+
+impl<T: NativeType> From<&[T]> for Literal {
+    fn from(f: &[T]) -> Self {
+        Literal::vec1(f)
+    }
+}
+
+impl Drop for Literal {
+    fn drop(&mut self) {
+        unsafe { c_lib::literal_free(self.0) }
+    }
+}
